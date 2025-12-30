@@ -22,6 +22,7 @@ jobs:
         with:
           python-version: "3.11"
 
+      # ✅ Install Google Chrome (stable)
       - name: Install Google Chrome
         run: |
           sudo apt-get update
@@ -34,13 +35,11 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # ✅ Run scraper
       - name: Run scraper
         run: python scrape.py
 
-      - name: Commit & Push updated CSVs
-        run: |
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add data/*.csv
-          git commit -m "Auto update AFCON data" || echo "No changes"
-          git push
+      # ✅ Upload debug HTML if scraper failed
+      - name: Upload debug HTML (if exists)
+        if: failure()
+        uses: actions/upload-artifact@v4
