@@ -42,6 +42,15 @@ def clean_team_name(name):
     return name.strip()
 
 
+def save_debug_html(html_text):
+    """Save debug HTML for inspection in GitHub Actions artifacts."""
+    try:
+        with open("debug_page.html", "w", encoding="utf-8") as f:
+            f.write(html_text if html_text else "EMPTY HTML")
+    except Exception as e:
+        print("⚠️ Could not write debug_page.html:", repr(e))
+
+
 def get_html_selenium_strong(url, wait=25, retries=2):
     """
     Strong Selenium fetch for GitHub Actions:
@@ -62,7 +71,7 @@ def get_html_selenium_strong(url, wait=25, retries=2):
             options.add_argument("--disable-gpu")
             options.add_argument("--window-size=1920,1080")
 
-            # ✅ Anti-bot / Stealth basics
+            # ✅ Anti-bot basics
             options.add_argument("--disable-blink-features=AutomationControlled")
             options.add_argument(
                 "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -86,7 +95,7 @@ def get_html_selenium_strong(url, wait=25, retries=2):
                 EC.presence_of_element_located((By.CSS_SELECTOR, "table#sched_all"))
             )
 
-            # Scroll a bit
+            # Scroll
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
             time.sleep(1)
             driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
@@ -96,6 +105,7 @@ def get_html_selenium_strong(url, wait=25, retries=2):
 
             # ✅ Cloudflare detection
             if "Just a moment" in html or "cf-browser-verification" in html or "Cloudflare" in html:
+                save_debug_html(html)
                 raise Exception("Cloudflare detected in HTML")
 
             driver.quit()
@@ -105,19 +115,16 @@ def get_html_selenium_strong(url, wait=25, retries=2):
             last_error = e
             print(f"⚠️ Selenium attempt {attempt+1}/{retries+1} failed: {repr(e)}")
 
-            # Save debug HTML
             if driver:
                 try:
                     html_debug = driver.page_source
                     print("----- HTML DEBUG START -----")
                     print(html_debug[:1200])
                     print("----- HTML DEBUG END -----")
-
-                    with open("debug_page.html", "w", encoding="utf-8") as f:
-                        f.write(html_debug)
-
+                    save_debug_html(html_debug)
                 except Exception as ee:
-                    print("⚠️ Could not save debug HTML:", repr(ee))
+                    print("⚠️ Could not capture debug HTML:", repr(ee))
+                    save_debug_html("FAILED TO CAPTURE HTML")
 
                 try:
                     driver.quit()
@@ -188,23 +195,24 @@ def extract_goals_global(html, home_team, away_team):
 # ✅ MAIN
 # =========================
 def main():
+    # Ensure debug file always exists (prevents artifact issues)
+    save_debug_html("DEBUG START\n")
+
     print("✅ Task 1: Fetch schedule HTML...")
     html = get_html_selenium_strong(SCHEDULE_URL, wait=25, retries=2)
 
     # Extra check
     if "Just a moment" in html or "cf-browser-verification" in html or "Cloudflare" in html:
         print("⚠️ Cloudflare page detected!")
-        with open("debug_page.html", "w", encoding="utf-8") as f:
-            f.write(html)
+        save_debug_html(html)
         raise Exception("Blocked by Cloudflare")
 
     print("✅ Task 2: Read matches table...")
     tables = pd.read_html(StringIO(html))
 
     if not tables:
-        print("❌ No tables extracted from HTML. Saving debug_page.html ...")
-        with open("debug_page.html", "w", encoding="utf-8") as f:
-            f.write(html)
+        print("❌ No tables extracted from HTML.")
+        save_debug_html(html)
         raise ValueError("No tables found in schedule page")
 
     matches_df = tables[0].copy()
