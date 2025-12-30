@@ -9,6 +9,10 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.chrome.options import Options
 from webdriver_manager.chrome import ChromeDriverManager
 
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+
 # =========================
 # ✅ SETTINGS
 # =========================
@@ -33,31 +37,72 @@ def clean_team_name(name):
     name = re.sub(r"\s+[a-z]{2}$", "", name)      # remove suffix code
     return name.strip()
 
-def get_html_selenium_strong(url, wait=8):
-    """Selenium Headless settings that work well on GitHub Actions."""
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")
-    options.add_argument("--disable-blink-features=AutomationControlled")
 
-    service = Service(ChromeDriverManager().install())
-    driver = webdriver.Chrome(service=service, options=options)
+def get_html_selenium_strong(url, wait=12, retries=2):
+    """
+    Selenium Headless settings that work better on GitHub Actions.
+    - waits for table element to load
+    - adds user agent and removes webdriver flag
+    - retries if table not found
+    """
 
-    driver.get(url)
-    time.sleep(wait)
+    last_error = None
 
-    # scroll for lazy content
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
-    time.sleep(1)
-    driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-    time.sleep(1)
+    for attempt in range(retries + 1):
+        try:
+            options = Options()
+            options.add_argument("--headless=new")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920,1080")
 
-    html = driver.page_source
-    driver.quit()
-    return html
+            # ✅ Stealth / Anti-bot
+            options.add_argument("--disable-blink-features=AutomationControlled")
+            options.add_argument(
+                "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
+            options.add_experimental_option("excludeSwitches", ["enable-automation"])
+            options.add_experimental_option("useAutomationExtension", False)
+
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=options)
+
+            # ✅ Remove webdriver flag
+            driver.execute_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+            )
+
+            driver.get(url)
+
+            # ✅ Wait until schedule table exists
+            WebDriverWait(driver, wait).until(
+                EC.presence_of_element_located((By.CSS_SELECTOR, "table.stats_table"))
+            )
+
+            # ✅ scroll for lazy content
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight/2);")
+            time.sleep(1)
+            driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+            time.sleep(1)
+
+            html = driver.page_source
+            driver.quit()
+
+            # ✅ Detect Cloudflare page
+            if "Just a moment" in html or "cf-browser-verification" in html:
+                raise Exception("Cloudflare detected: blocking the request")
+
+            return html
+
+        except Exception as e:
+            last_error = e
+            print(f"⚠️ Selenium attempt {attempt+1}/{retries+1} failed: {e}")
+            time.sleep(2)
+
+    raise Exception(f"❌ Failed to load page after retries. Last error: {last_error}")
+
 
 def get_match_report_links(html):
     soup = BeautifulSoup(html, "html.parser")
@@ -70,6 +115,7 @@ def get_match_report_links(html):
             link = "https://fbref.com" + report_cell.find("a")["href"]
             match_links.append(link)
     return match_links
+
 
 def extract_goals_global(html, home_team, away_team):
     soup = BeautifulSoup(html, "html.parser")
@@ -111,15 +157,28 @@ def extract_goals_global(html, home_team, away_team):
 
     return goals
 
+
 # =========================
 # ✅ MAIN PROCESS
 # =========================
 def main():
     print("✅ Task 1: Fetch schedule HTML...")
-    html = get_html_selenium_strong(SCHEDULE_URL, wait=6)
+    html = get_html_selenium_strong(SCHEDULE_URL, wait=12, retries=2)
+
+    # ✅ Debug check
+    if "Just a moment" in html or "cf-browser-verification" in html:
+        print("⚠️ Cloudflare page detected!")
+        print(html[:500])
+        raise Exception("Blocked by Cloudflare")
 
     print("✅ Task 2: Read matches table...")
     tables = pd.read_html(html)
+
+    if not tables:
+        print("❌ No tables extracted from HTML. Dumping HTML head for debug:")
+        print(html[:800])
+        raise ValueError("No tables found in schedule page")
+
     matches_df = tables[0].copy()
     print("✅ matches rows:", len(matches_df))
 
@@ -136,7 +195,9 @@ def main():
     matches_df["HomeGoals"] = pd.to_numeric(score_split[0], errors="coerce")
     matches_df["AwayGoals"] = pd.to_numeric(score_split[1], errors="coerce")
 
-    matches_df["MatchStatus"] = matches_df["HomeGoals"].apply(lambda x: "Played" if pd.notna(x) else "Upcoming")
+    matches_df["MatchStatus"] = matches_df["HomeGoals"].apply(
+        lambda x: "Played" if pd.notna(x) else "Upcoming"
+    )
 
     matches_df["MatchID"] = (
         matches_df["Date"].astype(str).str[:10] + "_" +
@@ -176,9 +237,8 @@ def main():
 
     for idx, row in matches_reports.iterrows():
         link = row["MatchReportLink"]
-
         try:
-            html_match = get_html_selenium_strong(link, wait=8)
+            html_match = get_html_selenium_strong(link, wait=12, retries=1)
             goals = extract_goals_global(html_match, row["HomeTeam"], row["AwayTeam"])
 
             for g in goals:
@@ -209,12 +269,16 @@ def main():
     # =========================
     print("✅ Task 5: Build summaries...")
 
+    if goals_df.empty:
+        print("⚠️ goals_df is empty. Summaries will be empty too.")
+
     teams_summary = (
         goals_df.groupby("TeamScored")
         .agg(GoalsScored=("TeamScored", "count"), MatchesWithGoals=("MatchID", "nunique"))
         .reset_index()
         .sort_values("GoalsScored", ascending=False)
-    )
+    ) if not goals_df.empty else pd.DataFrame(columns=["TeamScored", "GoalsScored", "MatchesWithGoals"])
+
     teams_summary.to_csv(TEAMS_FILE, index=False, encoding="utf-8-sig")
     print("✅ Saved teams summary:", TEAMS_FILE)
 
@@ -223,7 +287,8 @@ def main():
         .agg(Goals=("Scorer", "count"), MatchesScoredIn=("MatchID", "nunique"))
         .reset_index()
         .sort_values("Goals", ascending=False)
-    )
+    ) if not goals_df.empty else pd.DataFrame(columns=["Scorer", "Goals", "MatchesScoredIn"])
+
     players_summary.to_csv(PLAYERS_FILE, index=False, encoding="utf-8-sig")
     print("✅ Saved players summary:", PLAYERS_FILE)
 
@@ -231,11 +296,13 @@ def main():
         goals_df.groupby(["MatchID", "Date", "HomeTeam", "AwayTeam"])
         .size()
         .reset_index(name="TotalGoals")
-    )
+    ) if not goals_df.empty else pd.DataFrame(columns=["MatchID", "Date", "HomeTeam", "AwayTeam", "TotalGoals"])
+
     match_total_goals.to_csv(MATCHES_SUMMARY_FILE, index=False, encoding="utf-8-sig")
     print("✅ Saved matches summary:", MATCHES_SUMMARY_FILE)
 
     print("✅ DONE ✅ All files updated successfully!")
+
 
 if __name__ == "__main__":
     main()
